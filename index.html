@@ -3,103 +3,152 @@
 <head>
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1.0"/>
-<title>Stars</title>
+<title>Cyber Net</title>
+<meta name="description" content="Cyber Net is the home of the Cybersecurity &amp; IT Student Association at Penn State Abington."/>
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
 html,body{width:100%;height:100%;overflow:hidden;background:#000}
 canvas{display:block;position:fixed;top:0;left:0;width:100%;height:100%}
 .v{pointer-events:none;position:fixed;inset:0;background:radial-gradient(ellipse at center,transparent 55%,rgba(0,0,0,.7) 100%);z-index:2}
+
+/* Title and blurb, layered over the stars. Clicks pass through to the canvas (except the link). */
+.hero{pointer-events:none;position:fixed;inset:0;z-index:3;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:0 clamp(16px,5vw,40px) 4vh;text-align:center;font-family:system-ui,-apple-system,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;-webkit-text-size-adjust:100%;text-size-adjust:100%}
+/* A soft dark patch behind the words, so a star next to a letter doesn't read as a stray period. */
+.words{display:flex;flex-direction:column;align-items:center;background:rgba(0,0,0,.6);box-shadow:0 0 3em 3em rgba(0,0,0,.6)}
+.title{position:relative;font-size:clamp(1.6rem,9.5vw,6rem);font-weight:300;line-height:1.1;letter-spacing:.28em;text-transform:uppercase;white-space:nowrap;color:#fff;text-shadow:0 0 .18em rgba(255,255,255,.35)}
+.title span{display:block;padding-left:.28em;animation:write .9s linear .7s backwards}
+/* The shooting star that writes the title: same 1.6px line, 160px tail and soft head as the canvas ones. */
+.title::after{content:"";position:absolute;left:0;top:50%;width:100%;height:10px;margin:-5px 0 0 5px;opacity:0;background:radial-gradient(circle at calc(100% - 5px) 50%,#fff,rgba(255,255,255,0) 5px),linear-gradient(to left,#fff,rgba(255,255,255,.4) 30%,rgba(255,255,255,0)) right 5px center/min(160px,45%) 1.6px no-repeat;animation:streak 1.35s linear .475s backwards}
+.about{max-width:34em;margin-top:clamp(1rem,3vh,1.75rem);font-size:clamp(1rem,.95rem + .3vw,1.125rem);line-height:1.65;color:#c7d0de;animation:show 1s ease-out 1.6s backwards}
+.about a{pointer-events:auto;color:#8fb4ff;text-underline-offset:.2em}
+.about a:hover{color:#fff}
+.about a:focus-visible{outline:2px solid #8fb4ff;outline-offset:3px}
+/* write and streak move at the same speed, so the title appears right behind the star's head. */
+@keyframes write{from{clip-path:inset(-.5em 100% -.5em -.5em)}to{clip-path:inset(-.5em)}}
+@keyframes streak{0%{transform:translateX(calc(-125% - .125em));opacity:0}16.667%{transform:translateX(-100%);opacity:1}83.333%{transform:translateX(.5em);opacity:1}100%{transform:translateX(calc(25% + .625em));opacity:0}}
+@keyframes show{from{opacity:0}}
+@media (prefers-reduced-motion:reduce){.title span,.title::after,.about{animation:none}}
 </style>
 </head>
 <body>
 <canvas id="c"></canvas>
 <div class="v"></div>
+<main class="hero">
+<div class="words">
+<h1 class="title"><span>Cyber Net</span></h1>
+<p class="about">Cyber Net is the home of the Cybersecurity &amp; IT Student Association at Penn State Abington. We learn to hack hands-on, the legal way, and any major or level is welcome. Start at <a href="https://cisa.cybernet.rocks/">cisa.cybernet.rocks</a>.</p>
+</div>
+</main>
 <script>
-const cv=document.getElementById('c'),cx=cv.getContext('2d');
-let W,H,stars=[],shoots=[];
-const S=400,TW=110,MV=50,SI=3400;
+// Star field. Everything is allocated once up front, so the animation loop creates no garbage:
+// typed arrays instead of per-star objects, ring buffers for trails, a fixed pool of shooting stars,
+// and gradients built once and positioned with transforms instead of re-created every frame.
+const cv=document.getElementById('c'),cx=cv.getContext('2d',{alpha:false});
+const S=400,TW=110,MV=50,SI=3400,TL=12,MAXSH=8,TAU=Math.PI*2;
+const MAXPX=2560*1440; // cap the canvas bitmap; bigger screens get it scaled up by CSS
 const r=(a,b)=>Math.random()*(b-a)+a;
+let W=0,H=0,K=1,ls=0,rt=0;
 
-function resize(){W=cv.width=innerWidth;H=cv.height=innerHeight;build();}
+// static stars
+const sX=new Float32Array(S),sY=new Float32Array(S),sR=new Float32Array(S),
+  sA=new Float32Array(S),sS=new Float32Array(S),sP=new Float32Array(S);
+// drifting stars, each with a ring buffer of its last few positions for the trail
+const mX=new Float32Array(MV),mY=new Float32Array(MV),mR=new Float32Array(MV),mA=new Float32Array(MV),
+  mVX=new Float32Array(MV),mVY=new Float32Array(MV),mL=new Uint8Array(MV),mH=new Uint8Array(MV),mN=new Uint8Array(MV),
+  tX=new Float32Array(MV*TL),tY=new Float32Array(MV*TL);
+// shooting stars: a fixed pool, so clicking fast can't pile them up
+const hX=new Float32Array(MAXSH),hY=new Float32Array(MAXSH),hVX=new Float32Array(MAXSH),
+  hVY=new Float32Array(MAXSH),hA=new Float32Array(MAXSH),hF=new Float32Array(MAXSH),hOn=new Uint8Array(MAXSH);
 
-function mkStatic(i){
-  return{mov:0,x:r(0,W),y:r(0,H),rad:r(.18,i<TW?1.5:.9),ba:r(.35,1),
-    tw:i<TW,ts:r(.003,.02),tp:r(0,Math.PI*2)};
-}
-function mkMove(){
-  const a=r(0,Math.PI*2),s=r(.06,.38);
-  return{mov:1,x:r(0,W),y:r(0,H),rad:r(.25,1),al:r(.3,.8),
-    vx:Math.cos(a)*s,vy:Math.sin(a)*s,tr:[],tl:Math.floor(r(3,12))};
-}
-function mkShoot(){
-  const a=r(.18,.55),s=r(9,18);
-  return{x:r(W*.05,W*.85),y:r(-10,H*.4),vx:Math.cos(a)*s,vy:Math.sin(a)*s,
-    al:1,fade:r(.011,.024),dead:0};
-}
-function build(){stars=[];for(let i=0;i<S+MV;i++)stars.push(i<S?mkStatic(i):mkMove());}
+// gradients in unit/local space, made once
+const GLOW=cx.createRadialGradient(0,0,0,0,0,1);
+GLOW.addColorStop(0,'rgba(255,255,255,.55)');GLOW.addColorStop(1,'transparent');
+const TAIL=cx.createLinearGradient(0,0,-160,0);
+TAIL.addColorStop(0,'#fff');TAIL.addColorStop(.3,'rgba(255,255,255,.4)');TAIL.addColorStop(1,'transparent');
+const HEAD=cx.createRadialGradient(0,0,0,0,0,4);
+HEAD.addColorStop(0,'#fff');HEAD.addColorStop(1,'transparent');
 
-function dSt(s,t){
-  let a=s.ba;
-  if(s.tw)a*=.4+.6*(.5+.5*Math.sin(t*s.ts+s.tp));
-  cx.save();cx.globalAlpha=a;
-  if(s.rad>.9){
-    const g=cx.createRadialGradient(s.x,s.y,0,s.x,s.y,s.rad*4);
-    g.addColorStop(0,'rgba(255,255,255,.55)');g.addColorStop(1,'transparent');
-    cx.fillStyle=g;cx.beginPath();cx.arc(s.x,s.y,s.rad*4,0,Math.PI*2);cx.fill();
+function build(){
+  for(let i=0;i<S;i++){sX[i]=r(0,W);sY[i]=r(0,H);sR[i]=r(.18,i<TW?1.5:.9);sA[i]=r(.35,1);sS[i]=r(.003,.02);sP[i]=r(0,TAU);}
+  for(let j=0;j<MV;j++){const a=r(0,TAU),s=r(.06,.38);
+    mX[j]=r(0,W);mY[j]=r(0,H);mR[j]=r(.25,1);mA[j]=r(.3,.8);
+    mVX[j]=Math.cos(a)*s;mVY[j]=Math.sin(a)*s;mL[j]=Math.floor(r(3,12));mH[j]=0;mN[j]=0;}
+}
+function size(){
+  rt=0;
+  const w=innerWidth,h=innerHeight;
+  if(w===W&&h===H)return;
+  if(!W){W=w;H=h;build();}
+  else{ // keep the same stars and stretch them to the new size instead of reshuffling
+    const fx=w/W,fy=h/H;
+    for(let i=0;i<S;i++){sX[i]*=fx;sY[i]*=fy;}
+    for(let j=0;j<MV;j++){mX[j]*=fx;mY[j]*=fy;mN[j]=0;}
+    for(let j=0;j<MAXSH;j++){hX[j]*=fx;hY[j]*=fy;}
+    W=w;H=h;
   }
-  cx.fillStyle='#fff';cx.beginPath();cx.arc(s.x,s.y,s.rad,0,Math.PI*2);cx.fill();
-  cx.restore();
+  K=Math.min(1,Math.sqrt(MAXPX/(w*h)));
+  cv.width=Math.round(w*K);cv.height=Math.round(h*K);
 }
-function dMv(s){
-  s.tr.forEach((p,i)=>{
-    cx.save();cx.globalAlpha=s.al*(i/s.tr.length)*.35;cx.fillStyle='#fff';
-    cx.beginPath();cx.arc(p.x,p.y,s.rad*(i/s.tr.length),0,Math.PI*2);cx.fill();cx.restore();
-  });
-  cx.save();cx.globalAlpha=s.al;cx.fillStyle='#fff';
-  cx.beginPath();cx.arc(s.x,s.y,s.rad,0,Math.PI*2);cx.fill();cx.restore();
-}
-function dSh(s){
-  if(s.dead)return;
-  const m=Math.hypot(s.vx,s.vy),nx=s.vx/m,ny=s.vy/m;
-  const ex=s.x-nx*160,ey=s.y-ny*160;
-  const g=cx.createLinearGradient(s.x,s.y,ex,ey);
-  g.addColorStop(0,`rgba(255,255,255,${s.al})`);
-  g.addColorStop(.3,`rgba(255,255,255,${s.al*.4})`);
-  g.addColorStop(1,'transparent');
-  cx.save();cx.strokeStyle=g;cx.lineWidth=1.6;cx.lineCap='round';
-  cx.beginPath();cx.moveTo(s.x,s.y);cx.lineTo(ex,ey);cx.stroke();
-  cx.globalAlpha=s.al;
-  const hg=cx.createRadialGradient(s.x,s.y,0,s.x,s.y,4);
-  hg.addColorStop(0,'rgba(255,255,255,1)');hg.addColorStop(1,'transparent');
-  cx.fillStyle=hg;cx.beginPath();cx.arc(s.x,s.y,4,0,Math.PI*2);cx.fill();
-  cx.restore();
+function spawn(){
+  for(let j=0;j<MAXSH;j++)if(!hOn[j]){
+    const a=r(.18,.55),s=r(9,18);
+    hX[j]=r(W*.05,W*.85);hY[j]=r(-10,H*.4);hVX[j]=Math.cos(a)*s;hVY[j]=Math.sin(a)*s;
+    hA[j]=1;hF[j]=r(.011,.024);hOn[j]=1;return;
+  }
 }
 
-let ls=0;
 function loop(t){
   requestAnimationFrame(loop);
-  cx.clearRect(0,0,W,H);cx.fillStyle='#000';cx.fillRect(0,0,W,H);
-  stars.forEach(s=>{
-    if(!s.mov){dSt(s,t);}
-    else{
-      s.tr.push({x:s.x,y:s.y});if(s.tr.length>s.tl)s.tr.shift();
-      s.x+=s.vx;s.y+=s.vy;
-      if(s.x<-5)s.x=W+5;if(s.x>W+5)s.x=-5;
-      if(s.y<-5)s.y=H+5;if(s.y>H+5)s.y=-5;
-      dMv(s);
+  cx.setTransform(1,0,0,1,0,0);cx.globalAlpha=1;cx.fillStyle='#000';cx.fillRect(0,0,cv.width,cv.height);
+  cx.fillStyle='#fff';
+
+  for(let i=0;i<S;i++){
+    let a=sA[i];
+    if(i<TW)a*=.4+.6*(.5+.5*Math.sin(t*sS[i]+sP[i]));
+    cx.globalAlpha=a;
+    const x=sX[i],y=sY[i],rad=sR[i];
+    if(rad>.9){
+      const g=rad*4*K;
+      cx.setTransform(g,0,0,g,x*K,y*K);cx.fillStyle=GLOW;
+      cx.beginPath();cx.arc(0,0,1,0,TAU);cx.fill();cx.fillStyle='#fff';
     }
-  });
-  if(t-ls>SI){shoots.push(mkShoot());ls=t;}
-  shoots=shoots.filter(s=>!s.dead);
-  shoots.forEach(s=>{
-    s.x+=s.vx;s.y+=s.vy;s.al-=s.fade;
-    if(s.al<=0||s.x>W+80||s.y>H+80)s.dead=1;
-    dSh(s);
-  });
+    cx.setTransform(K,0,0,K,0,0);
+    cx.beginPath();cx.arc(x,y,rad,0,TAU);cx.fill();
+  }
+
+  cx.setTransform(K,0,0,K,0,0);
+  for(let j=0;j<MV;j++){
+    const o=j*TL;let h=mH[j],n=mN[j];
+    tX[o+h]=mX[j];tY[o+h]=mY[j];h=(h+1)%TL;if(n<mL[j])n++;mH[j]=h;mN[j]=n;
+    let x=mX[j]+mVX[j],y=mY[j]+mVY[j];
+    if(x<-5)x=W+5;if(x>W+5)x=-5;
+    if(y<-5)y=H+5;if(y>H+5)y=-5;
+    mX[j]=x;mY[j]=y;
+    const al=mA[j],rad=mR[j];
+    for(let i=1;i<n;i++){
+      const k=(h-n+i+TL)%TL,f=i/n;
+      cx.globalAlpha=al*f*.35;cx.beginPath();cx.arc(tX[o+k],tY[o+k],rad*f,0,TAU);cx.fill();
+    }
+    cx.globalAlpha=al;cx.beginPath();cx.arc(x,y,rad,0,TAU);cx.fill();
+  }
+
+  if(t-ls>SI){spawn();ls=t;}
+  for(let j=0;j<MAXSH;j++){
+    if(!hOn[j])continue;
+    const x=hX[j]+hVX[j],y=hY[j]+hVY[j],a=hA[j]-hF[j];
+    hX[j]=x;hY[j]=y;hA[j]=a;
+    if(a<=0||x>W+80||y>H+80){hOn[j]=0;continue;}
+    const vx=hVX[j],vy=hVY[j],m=Math.hypot(vx,vy),nx=vx/m*K,ny=vy/m*K;
+    cx.setTransform(nx,ny,-ny,nx,x*K,y*K);cx.globalAlpha=a;
+    cx.strokeStyle=TAIL;cx.lineWidth=1.6;cx.lineCap='round';
+    cx.beginPath();cx.moveTo(0,0);cx.lineTo(-160,0);cx.stroke();
+    cx.fillStyle=HEAD;cx.beginPath();cx.arc(0,0,4,0,TAU);cx.fill();cx.fillStyle='#fff';
+  }
 }
-window.addEventListener('resize',resize);
-cv.addEventListener('click',()=>shoots.push(mkShoot()));
-resize();requestAnimationFrame(loop);
+// resize settles first, then the canvas is reallocated once (not on every resize event)
+window.addEventListener('resize',()=>{clearTimeout(rt);rt=setTimeout(size,150);});
+cv.addEventListener('click',spawn);
+size();requestAnimationFrame(loop);
 </script>
 </body>
 </html>
