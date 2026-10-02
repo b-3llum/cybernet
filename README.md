@@ -1,3 +1,3 @@
 # cybernet
 
-root repo for [cybernet.rocks](cybernet.rocks)
+root repo for [cybernet.rocks](https://cybernet.rocks)
